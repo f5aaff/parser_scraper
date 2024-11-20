@@ -1,16 +1,31 @@
 use reqwest::blocking::Client;
 use scraper::{Html, Selector};
-use std::{fs, thread,time::Duration};
 use std::collections::HashSet;
+use std::{fs, thread, time::Duration};
 //use std::path::Path;
+use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use threadpool::ThreadPool;
 
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    // config file path
+    #[arg(short, long, default_value = "./shared_libs/")]
+    output: String,
+
+    // target dir/file
+    #[arg(short, long, default_value = "10")]
+    threads: usize,
+}
 fn main() {
     let url = "https://github.com/tree-sitter/tree-sitter/wiki/List-of-parsers";
-    let max_threads = 10; // Maximum number of concurrent threads
+
+    let args = Args::parse();
+    let max_threads = args.threads;
+    let output_dir = Arc::new(Mutex::new(args.output));
     let pool = ThreadPool::new(max_threads); // Thread pool with fixed size
     let target_parsers: HashSet<&str> = [
         "python",
@@ -19,7 +34,7 @@ fn main() {
         "rust",
         "go",
         "cpp",
-        "cplusplus"
+        "cplusplus",
     ]
     .iter()
     .cloned()
@@ -28,7 +43,7 @@ fn main() {
     let raw_parsers = scrape_parsers(url).unwrap();
     let parsers: Vec<_> = raw_parsers
         .into_iter()
-        .filter(|(lang,_)| target_parsers.contains(lang.as_str()))
+        .filter(|(lang, _)| target_parsers.contains(lang.as_str()))
         .collect();
     let total_parsers = parsers.len();
     let completed = Arc::new(Mutex::new(0)); // Shared counter for progress
@@ -47,7 +62,7 @@ fn main() {
         let completed = Arc::clone(&completed);
         let multi_progress = Arc::clone(&multi_progress);
         let overall_progress = overall_progress.clone();
-
+        let output = Arc::clone(&output_dir);
         pool.execute(move || {
             // Create a progress bar only when the task starts
             let pb = multi_progress.add(ProgressBar::new_spinner());
@@ -66,7 +81,7 @@ fn main() {
             });
 
             // Execute the task
-            if let Err(e) = clone_and_build(&lang, &repo_url, &pb) {
+            if let Err(e) = clone_and_build(&lang, &repo_url, &pb,output) {
                 pb.set_message(format!("Failed for {}: {}", lang, e));
             } else {
                 pb.finish_with_message(format!("Done with {}", lang));
@@ -117,11 +132,16 @@ fn clone_and_build(
     lang: &str,
     repo_url: &str,
     pb: &ProgressBar,
+    output_dir: Arc<Mutex<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     pb.set_message(format!("Cloning {}", repo_url));
 
     // Clone the repository
-    let clone_output = Command::new("git").arg("clone").arg(repo_url).arg(format!("tree-sitter-{}",lang)).output()?;
+    let clone_output = Command::new("git")
+        .arg("clone")
+        .arg(repo_url)
+        .arg(format!("tree-sitter-{}", lang))
+        .output()?;
 
     if !clone_output.status.success() {
         return Err(format!(
@@ -141,13 +161,14 @@ fn clone_and_build(
 
     pb.set_message(format!("Building grammar for {}", lang));
 
+    let output_dir = output_dir.lock().unwrap();
     // Build the grammar using GCC
     let mut gcc_cmd = Command::new("gcc");
     gcc_cmd
         .arg("-shared")
         .arg("-fPIC")
         .arg("-o")
-        .arg(format!("../shared_libs/lib{}.so", lang))
+        .arg(format!("{}lib{}.so",*output_dir, lang))
         .arg(parser_c_path);
 
     if let Some(scanner_c) = scanner_c_path {
