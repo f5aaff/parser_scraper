@@ -1,1 +1,3 @@
-/target
+target/
+shared_libs/
+shared_libs_src/
