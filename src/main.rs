@@ -16,59 +16,73 @@ struct Args {
     #[arg(short, long, default_value = "./shared_libs/")]
     output: String,
 
+    #[arg(short, long, default_value = "./shared_libs_src/")]
+    source_destination: String,
+
     // target dir/file
     #[arg(short, long, default_value = "10")]
     threads: usize,
+
+    #[arg(short, long, value_delimiter = ',', required = false)]
+    languages: Vec<String>,
 }
+
 fn main() {
     let url = "https://github.com/tree-sitter/tree-sitter/wiki/List-of-parsers";
 
     let args = Args::parse();
     let max_threads = args.threads;
     let output_dir = Arc::new(Mutex::new(args.output));
+    let source_destination = Arc::new(Mutex::new(args.source_destination));
+    let languages = args.languages;
     let pool = ThreadPool::new(max_threads); // Thread pool with fixed size
-    let target_parsers: HashSet<&str> = [
-        "python",
-        "javascript",
-        "java",
-        "rust",
-        "go",
-        "cpp",
-        "cplusplus",
-    ]
-    .iter()
-    .cloned()
-    .collect();
+    let target_parsers: HashSet<&str> = languages.iter().map(|s| s.as_str()).collect();
+
     // Step 1: Scrape the list of parsers
-    let raw_parsers = scrape_parsers(url).unwrap();
-    let parsers: Vec<_> = raw_parsers
-        .into_iter()
-        .filter(|(lang, _)| target_parsers.contains(lang.as_str()))
-        .collect();
+    let raw_parsers = match scrape_parsers(url) {
+        Ok(rp) => rp,
+        Err(e) => {
+            eprintln!("Error scraping parsers: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let parsers: Vec<(String, String)>;
+    if target_parsers.len() > 0 {
+        parsers = raw_parsers
+            .into_iter()
+            .filter(|(lang, _)| target_parsers.contains(lang.as_str()))
+            .collect();
+    } else {
+        parsers = raw_parsers.into_iter().collect();
+    }
+
     let total_parsers = parsers.len();
     let completed = Arc::new(Mutex::new(0)); // Shared counter for progress
-
+    let failed = Arc::new(Mutex::new(0));
     // Step 2: Set up multi-progress bar
     let multi_progress = Arc::new(MultiProgress::new());
     let overall_progress = multi_progress.add(ProgressBar::new(total_parsers as u64));
     overall_progress.set_style(
         ProgressStyle::default_bar()
-            .template("[{elapsed_precise}] {pos}/{len} completed")
+            .template("[{elapsed_precise}] {pos}/{len} completed {msg}")
             .unwrap(),
     );
 
     // Submit tasks to the thread pool
     for (lang, repo_url) in parsers {
         let completed = Arc::clone(&completed);
+        let failed = Arc::clone(&failed);
         let multi_progress = Arc::clone(&multi_progress);
         let overall_progress = overall_progress.clone();
         let output = Arc::clone(&output_dir);
+        let source_dest = Arc::clone(&source_destination);
+
         pool.execute(move || {
             // Create a progress bar only when the task starts
             let pb = multi_progress.add(ProgressBar::new_spinner());
             pb.set_style(
                 ProgressStyle::default_spinner()
-                    .template("{spinner:.green} {msg}")
+                    .template("{spinner:.green}[{elapsed_precise}] {msg}")
                     .unwrap(),
             );
             pb.set_message(format!("Cloning {}", lang));
@@ -81,8 +95,11 @@ fn main() {
             });
 
             // Execute the task
-            if let Err(e) = clone_and_build(&lang, &repo_url, &pb,output) {
-                pb.set_message(format!("Failed for {}: {}", lang, e));
+            if let Err(e) = clone_and_build(&lang, &repo_url, &pb, output, source_dest) {
+                pb.finish_with_message(format!("Failed for {}: {}", lang, e));
+
+                let mut failed_lock = failed.lock().unwrap();
+                *failed_lock += 1;
             } else {
                 pb.finish_with_message(format!("Done with {}", lang));
             }
@@ -94,13 +111,16 @@ fn main() {
             // Update overall progress
             let mut completed_lock = completed.lock().unwrap();
             *completed_lock += 1;
+            let failed_count = failed.lock().unwrap();
+            overall_progress.set_message(format!("{} failed", *failed_count));
             overall_progress.inc(1);
         });
     }
 
     // Wait for all tasks to finish
     pool.join();
-    overall_progress.finish_with_message("All tasks completed.");
+    let failed_count = failed.lock().unwrap();
+    overall_progress.finish_with_message(format!("All tasks completed. {} failed.", failed_count));
 }
 
 // Scrape parsers from the Tree-sitter wiki
@@ -133,14 +153,16 @@ fn clone_and_build(
     repo_url: &str,
     pb: &ProgressBar,
     output_dir: Arc<Mutex<String>>,
+    source_destination: Arc<Mutex<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     pb.set_message(format!("Cloning {}", repo_url));
 
+    let source_destination = source_destination.lock().unwrap();
     // Clone the repository
     let clone_output = Command::new("git")
         .arg("clone")
         .arg(repo_url)
-        .arg(format!("tree-sitter-{}", lang))
+        .arg(format!("{}tree-sitter-{}", source_destination, lang))
         .output()?;
 
     if !clone_output.status.success() {
@@ -152,7 +174,7 @@ fn clone_and_build(
         .into());
     }
 
-    let repo_dir = format!("tree-sitter-{}", lang);
+    let repo_dir = format!("{}tree-sitter-{}", source_destination, lang);
     pb.set_message(format!("Cloned {}. Searching for parser.c", lang));
 
     // Search for parser.c in the cloned directory
@@ -160,7 +182,6 @@ fn clone_and_build(
     let scanner_c_path = find_file(&repo_dir, "scanner.c").ok(); // scanner.c is optional
 
     pb.set_message(format!("Building grammar for {}", lang));
-
     let output_dir = output_dir.lock().unwrap();
     // Build the grammar using GCC
     let mut gcc_cmd = Command::new("gcc");
@@ -168,7 +189,7 @@ fn clone_and_build(
         .arg("-shared")
         .arg("-fPIC")
         .arg("-o")
-        .arg(format!("{}lib{}.so",*output_dir, lang))
+        .arg(format!("{}lib{}.so", *output_dir, lang))
         .arg(parser_c_path);
 
     if let Some(scanner_c) = scanner_c_path {
