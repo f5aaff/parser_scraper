@@ -4,11 +4,13 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+indicatif = "0.17.9"
 # Reqwest for making HTTP requests
 reqwest = { version = "0.12.9", features = ["blocking", "json"] }
 
 # Scraper for parsing the HTML and extracting links
 scraper = "0.21.0"
+threadpool = "1.8.1"
 
 # Tokio for async runtime (needed by reqwest if using async)
 tokio = { version = "1", features = ["full"] }
