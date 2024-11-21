@@ -122,7 +122,8 @@ fn main() {
             });
 
             // Execute the task
-            if let Err(e) = clone_and_build(&lang, &repo_url, &pb, output, source_dest,config_dest) {
+            if let Err(e) = clone_and_build(&lang, &repo_url, &pb, output, source_dest, config_dest)
+            {
                 pb.finish_with_message(format!("Failed for {}: {}", lang, e));
                 log::warn!("failed for {} : {}", lang, e);
                 let mut failed_lock = failed.lock().unwrap();
@@ -182,7 +183,7 @@ fn clone_and_build(
     pb: &ProgressBar,
     output_dir: Arc<Mutex<String>>,
     source_destination: Arc<Mutex<String>>,
-    config_path: Arc<Mutex<String>>
+    config_path: Arc<Mutex<String>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     pb.set_message(format!("Cloning {}", repo_url));
 
@@ -211,7 +212,7 @@ fn clone_and_build(
     let scanner_c_path = find_file(&repo_dir, "scanner.c").ok(); // scanner.c is optional
     pb.set_message(format!("Building grammar for {}", lang));
     let output_dir = output_dir.lock().unwrap();
-    let output_path = format!("{}lib{}.so",*output_dir,lang);
+    let output_path = format!("{}lib{}.so", *output_dir, lang);
     // Build the grammar using GCC
     let mut gcc_cmd = Command::new("gcc");
     gcc_cmd
@@ -237,20 +238,49 @@ fn clone_and_build(
 
     let config_path = config_path.lock().unwrap();
 
-    match create_config_entry(&repo_dir, &config_path, &output_path){
+    match create_config_entry(&repo_dir, &config_path, &output_path) {
         Ok(()) => (),
         Err(e) => {
-            log::error!("failed to create config entry for {} : {}",lang,e);
+            log::error!("failed to create config entry for {} : {}", lang, e);
         }
     };
     pb.set_message(format!("Built grammar for {}", lang));
     Ok(())
 }
 
+
+fn extract_comment_types(node_types: Value) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+
+    // Ensure that the data is an array
+    if let Value::Array(items) = node_types {
+        // Filter items where the "type" field contains the substring "comment"
+        let comment_types: Vec<String> = items
+            .iter()
+            .filter_map(|item| {
+                if let Some(Value::String(type_value)) = item.get("type") {
+                    if type_value.contains("comment") {
+                        Some(type_value.clone()) // Clone the string value
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(comment_types)
+    } else {
+        // If the JSON is not an array, return an error
+        Err("Expected JSON array at root".into())
+    }
+}
+
+
 fn create_config_entry(
     repo_dir: &str,
     config_path: &str,
-    shared_object_path: &str
+    shared_object_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // read the tree-sitter.json from the target repo
     let json_path = find_file(repo_dir, "tree-sitter.json")?;
@@ -259,6 +289,17 @@ fn create_config_entry(
     file.read_to_string(&mut file_content)?;
 
     let tree_sitter_json: Value = serde_json::from_str(&file_content)?;
+
+    // read the node-types.json from the target repo
+
+    let json_path = find_file(repo_dir, "node-types.json")?;
+    let mut file = File::open(json_path)?;
+    let mut file_content = String::new();
+    file.read_to_string(&mut file_content)?;
+
+    let node_types_json: Value = serde_json::from_str(&file_content)?;
+
+    let comment_types = extract_comment_types(node_types_json)?;
 
     // read the config file (existing known_languages data) or initialize a new structure
     let mut known_languages = if let Ok(mut output_file) = File::open(config_path) {
@@ -289,16 +330,15 @@ fn create_config_entry(
                     name.to_string(),
                     json!({
                         "path": shared_object_path,
-                        "extension": extension
+                        "extension": extension,
+                        "comment_types": comment_types
                     }),
                 );
             }
         }
     }
 
-    let output_json = json!({
-        "known_languages": known_languages
-    });
+    let output_json = json!({ "known_languages": known_languages });
 
     let mut output_file = File::create(config_path)?;
     output_file.write_all(output_json.to_string().as_bytes())?;
