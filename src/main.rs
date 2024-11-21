@@ -1,7 +1,6 @@
-use anyhow::Error;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use log::{log, LevelFilter};
+use log::LevelFilter;
 use log4rs::append::file::FileAppender;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
@@ -329,6 +328,7 @@ fn create_config_entry(
                 known_languages.insert(
                     name.to_string(),
                     json!({
+                        "language": name,
                         "path": shared_object_path,
                         "extension": extension,
                         "comment_types": comment_types
