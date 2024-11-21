@@ -1,7 +1,7 @@
 # Parser_scraper
 
 this is a simple cli tool for grabbing tree-sitter parsers, via scraping [this](https://github.com/tree-sitter/tree-sitter/wiki/List-of-parsers) wiki page.
-
+this exists essentially to get the shared object parsers, and generate a config for comment-away.
 
 # Requirements
 - git
@@ -19,10 +19,11 @@ this is a simple cli tool for grabbing tree-sitter parsers, via scraping [this](
 Options:
   -o, --output <OUTPUT>                          [default: ./shared_libs/]
   -s, --source-destination <SOURCE_DESTINATION>  [default: ./shared_libs_src/]
+  -c, --config-destination <CONFIG_DESTINATION>  [default: ./config.json]
   -t, --threads <THREADS>                        [default: 10]
   -l, --languages <LANGUAGES>
   -h, --help                                     Print help
-  -V, --version
+  -V, --version                                  Print version
 ```
 
 - ```./parser_scraper```
