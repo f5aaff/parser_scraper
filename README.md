@@ -6,7 +6,8 @@ this is a simple cli tool for grabbing tree-sitter parsers, via scraping [this](
 # Requirements
 - git
 - gcc
-
+- openssl
+- openssl-devel
 
 # building
 - building this should be as simple as running:
