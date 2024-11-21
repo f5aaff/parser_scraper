@@ -13,7 +13,7 @@ this is a simple cli tool for grabbing tree-sitter parsers, via scraping [this](
 ```cargo build```
 
 # Usage
-Usage: parser_scraper [OPTIONS]
+```Usage: parser_scraper [OPTIONS]
 
 Options:
   -o, --output <OUTPUT>                          [default: ./shared_libs/]
@@ -22,7 +22,7 @@ Options:
   -l, --languages <LANGUAGES>
   -h, --help                                     Print help
   -V, --version
-
+```
 
 - ```./parser_scraper```
 +   this will attempt to clone and build every parser in the list, which is ~400. this might take a while.
