@@ -1,12 +1,19 @@
-use reqwest::blocking::Client;
-use scraper::{Html, Selector};
-use std::collections::HashSet;
-use std::{fs, thread, time::Duration};
-//use std::path::Path;
+use anyhow::Error;
 use clap::Parser;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use log::{log, LevelFilter};
+use log4rs::append::file::FileAppender;
+use log4rs::config::{Appender, Config, Root};
+use log4rs::encode::pattern::PatternEncoder;
+use reqwest::blocking::Client;
+use scraper::{Html, Selector};
+use serde_json::{json, Map, Value};
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::{fs, thread, time::Duration};
 use threadpool::ThreadPool;
 
 #[derive(Parser, Debug)]
@@ -19,6 +26,9 @@ struct Args {
     #[arg(short, long, default_value = "./shared_libs_src/")]
     source_destination: String,
 
+    #[arg(short, long, default_value = "./config.json")]
+    config_destination: String,
+
     // target dir/file
     #[arg(short, long, default_value = "10")]
     threads: usize,
@@ -28,12 +38,29 @@ struct Args {
 }
 
 fn main() {
+    // logging ------------------------------------------------------------------
+    let logfile = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new(
+            "{l} [{d(%Y-%m-%d %H:%M:%S)}] - {m}\n",
+        )))
+        .build("log/output.log")
+        .unwrap();
+
+    let config = Config::builder()
+        .appender(Appender::builder().build("logfile", Box::new(logfile)))
+        .build(Root::builder().appender("logfile").build(LevelFilter::Info))
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
+
+    // --------------------------------------------------------------------------
     let url = "https://github.com/tree-sitter/tree-sitter/wiki/List-of-parsers";
 
     let args = Args::parse();
     let max_threads = args.threads;
     let output_dir = Arc::new(Mutex::new(args.output));
     let source_destination = Arc::new(Mutex::new(args.source_destination));
+    let config_destination = Arc::new(Mutex::new(args.config_destination));
     let languages = args.languages;
     let pool = ThreadPool::new(max_threads); // Thread pool with fixed size
     let target_parsers: HashSet<&str> = languages.iter().map(|s| s.as_str()).collect();
@@ -76,7 +103,7 @@ fn main() {
         let overall_progress = overall_progress.clone();
         let output = Arc::clone(&output_dir);
         let source_dest = Arc::clone(&source_destination);
-
+        let config_dest = Arc::clone(&config_destination);
         pool.execute(move || {
             // Create a progress bar only when the task starts
             let pb = multi_progress.add(ProgressBar::new_spinner());
@@ -95,13 +122,14 @@ fn main() {
             });
 
             // Execute the task
-            if let Err(e) = clone_and_build(&lang, &repo_url, &pb, output, source_dest) {
+            if let Err(e) = clone_and_build(&lang, &repo_url, &pb, output, source_dest,config_dest) {
                 pb.finish_with_message(format!("Failed for {}: {}", lang, e));
-
+                log::warn!("failed for {} : {}", lang, e);
                 let mut failed_lock = failed.lock().unwrap();
                 *failed_lock += 1;
             } else {
                 pb.finish_with_message(format!("Done with {}", lang));
+                log::info!("Done with {}", lang);
             }
 
             spinner_thread.join().unwrap();
@@ -154,6 +182,7 @@ fn clone_and_build(
     pb: &ProgressBar,
     output_dir: Arc<Mutex<String>>,
     source_destination: Arc<Mutex<String>>,
+    config_path: Arc<Mutex<String>>
 ) -> Result<(), Box<dyn std::error::Error>> {
     pb.set_message(format!("Cloning {}", repo_url));
 
@@ -180,16 +209,16 @@ fn clone_and_build(
     // Search for parser.c in the cloned directory
     let parser_c_path = find_file(&repo_dir, "parser.c")?;
     let scanner_c_path = find_file(&repo_dir, "scanner.c").ok(); // scanner.c is optional
-
     pb.set_message(format!("Building grammar for {}", lang));
     let output_dir = output_dir.lock().unwrap();
+    let output_path = format!("{}lib{}.so",*output_dir,lang);
     // Build the grammar using GCC
     let mut gcc_cmd = Command::new("gcc");
     gcc_cmd
         .arg("-shared")
         .arg("-fPIC")
         .arg("-o")
-        .arg(format!("{}lib{}.so", *output_dir, lang))
+        .arg(output_path.clone())
         .arg(parser_c_path);
 
     if let Some(scanner_c) = scanner_c_path {
@@ -206,7 +235,74 @@ fn clone_and_build(
         .into());
     }
 
+    let config_path = config_path.lock().unwrap();
+
+    match create_config_entry(&repo_dir, &config_path, &output_path){
+        Ok(()) => (),
+        Err(e) => {
+            log::error!("failed to create config entry for {} : {}",lang,e);
+        }
+    };
     pb.set_message(format!("Built grammar for {}", lang));
+    Ok(())
+}
+
+fn create_config_entry(
+    repo_dir: &str,
+    config_path: &str,
+    shared_object_path: &str
+) -> Result<(), Box<dyn std::error::Error>> {
+    // read the tree-sitter.json from the target repo
+    let json_path = find_file(repo_dir, "tree-sitter.json")?;
+    let mut file = File::open(json_path)?;
+    let mut file_content = String::new();
+    file.read_to_string(&mut file_content)?;
+
+    let tree_sitter_json: Value = serde_json::from_str(&file_content)?;
+
+    // read the config file (existing known_languages data) or initialize a new structure
+    let mut known_languages = if let Ok(mut output_file) = File::open(config_path) {
+        let mut output_file_content = String::new();
+        output_file.read_to_string(&mut output_file_content)?;
+        let existing_json: Value = serde_json::from_str(&output_file_content)?;
+        existing_json
+            .get("known_languages")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Map::new() // Start fresh if the output file doesn't exist
+    };
+
+    if let Some(grammars) = tree_sitter_json.get("grammars").and_then(Value::as_array) {
+        for grammar in grammars {
+            if let Some(name) = grammar.get("name").and_then(Value::as_str) {
+                let extension = grammar
+                    .get("file-types")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or(""); // Default to empty if no extension found
+
+                // Add or update the entry in known_languages
+                known_languages.insert(
+                    name.to_string(),
+                    json!({
+                        "path": shared_object_path,
+                        "extension": extension
+                    }),
+                );
+            }
+        }
+    }
+
+    let output_json = json!({
+        "known_languages": known_languages
+    });
+
+    let mut output_file = File::create(config_path)?;
+    output_file.write_all(output_json.to_string().as_bytes())?;
+
     Ok(())
 }
 
